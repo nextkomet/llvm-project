@@ -52,11 +52,10 @@ template <typename ConcreteType>
 class FenvOpTrait : public mlir::OpTrait::TraitBase<ConcreteType, FenvOpTrait> {
 public:
   mlir::Speculation::Speculatability getSpeculatability() {
-    // Masked exceptions cannot trap. When strict_except is false, exception
-    // side effects are non-deterministic, so speculation is still safe.
-    FPEnvConstrainedOpInterface fenvOp = getFenvOp();
-    if (fenvOp.getFenvExceptionMode() == cir::FPExceptionMode::Masked &&
-        !fenvOp.getFenvStrictExcept())
+    // An unconstrained operation, or one whose exceptions are masked and not
+    // strict, can neither trap nor observably change the exception flags.
+    cir::FenvAttr fenv = getConcreteOp().getFenvAttr();
+    if (!fenv || fenv.canIgnoreExceptions())
       return mlir::Speculation::Speculatable;
 
     return mlir::Speculation::NotSpeculatable;
@@ -64,7 +63,7 @@ public:
 
   void getEffects(
       llvm::SmallVectorImpl<mlir::MemoryEffects::EffectInstance> &effects) {
-    if (!getFenvOp().getFenvAttr())
+    if (!getConcreteOp().getFenvAttr())
       return;
     effects.emplace_back(mlir::MemoryEffects::Read::get(),
                          FloatingPointEnvironmentResource::get());
@@ -73,8 +72,8 @@ public:
   }
 
 private:
-  FPEnvConstrainedOpInterface getFenvOp() {
-    return mlir::cast<FPEnvConstrainedOpInterface>(this->getOperation());
+  ConcreteType getConcreteOp() {
+    return mlir::cast<ConcreteType>(this->getOperation());
   }
 };
 
