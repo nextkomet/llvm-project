@@ -4516,6 +4516,23 @@ static void emitGlobalConstantLargeInt(const ConstantInt *CI, AsmPrinter &AP) {
       CI->getValue(), AP.getDataLayout().getTypeStoreSize(CI->getType()), AP);
 }
 
+/// Emit \p Val as an integer of the store size of \p Ty, followed by the tail
+/// padding up to the alloc size of \p Ty.
+static void emitGlobalConstantAPInt(const DataLayout &DL, const APInt &Val,
+                                    Type *Ty, AsmPrinter &AP) {
+  // Some types, such as pointers in some address spaces, are wider than 64
+  // bits.
+  const uint64_t StoreSize = DL.getTypeStoreSize(Ty);
+  if (StoreSize <= 8)
+    AP.OutStreamer->emitIntValue(Val.getZExtValue(), StoreSize);
+  else
+    emitGlobalConstantLargeAPInt(Val, StoreSize, AP);
+  // Emit tail padding if needed.
+  const uint64_t Size = DL.getTypeAllocSize(Ty);
+  if (Size != StoreSize)
+    AP.OutStreamer->emitZeros(Size - StoreSize);
+}
+
 /// Transform a not absolute MCExpr containing a reference to a GOT
 /// equivalent global, by a target specific GOT pc relative access to the
 /// final symbol.
@@ -4692,19 +4709,9 @@ static void emitGlobalConstantImpl(const DataLayout &DL, const Constant *CV,
   if (isa<ConstantPointerNull>(CV)) {
     if (isa<VectorType>(CV->getType()))
       return emitGlobalConstantVector(DL, CV, AP, AliasList);
-
-    // Some pointers can be wider than 64 bits.
-    APInt NullValue =
-        DL.getNullPtrValue(CV->getType()->getPointerAddressSpace());
-    const uint64_t StoreSize = DL.getTypeStoreSize(CV->getType());
-    if (StoreSize <= 8)
-      AP.OutStreamer->emitIntValue(NullValue.getZExtValue(), StoreSize);
-    else
-      emitGlobalConstantLargeAPInt(NullValue, StoreSize, AP);
-    // Emit tail padding if needed.
-    if (Size != StoreSize)
-      AP.OutStreamer->emitZeros(Size - StoreSize);
-    return;
+    return emitGlobalConstantAPInt(
+        DL, DL.getNullPtrValue(CV->getType()->getPointerAddressSpace()),
+        CV->getType(), AP);
   }
 
   if (const ConstantDataSequential *CDS = dyn_cast<ConstantDataSequential>(CV))
@@ -4738,6 +4745,16 @@ static void emitGlobalConstantImpl(const DataLayout &DL, const Constant *CV,
   // Otherwise, it must be a ConstantExpr.  Lower it to an MCExpr, then emit it
   // thread the streamer with EmitValue.
   const MCExpr *ME = AP.lowerConstant(CV, BaseCV, Offset);
+
+  // The streamer cannot emit an expression wider than 64 bits. A target can
+  // still lower a constant expression of such a type to a constant, for
+  // example a cast of null, so emit it as an integer.
+  const auto *MCE = dyn_cast<MCConstantExpr>(ME);
+  if (MCE && Size > 8) {
+    APInt Val(DL.getTypeSizeInBits(CV->getType()), MCE->getValue(),
+              /*isSigned=*/true);
+    return emitGlobalConstantAPInt(DL, Val, CV->getType(), AP);
+  }
 
   // Since lowerConstant already folded and got rid of all IR pointer and
   // integer casts, detect GOT equivalent accesses by looking into the MCExpr
